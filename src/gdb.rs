@@ -321,12 +321,10 @@ impl GDBManager {
         session_id: &str,
         reg_list: Option<Vec<String>>,
     ) -> AppResult<Vec<Register>> {
-        let reg_list = reg_list
-            .map(|s| s.iter().map(|num| num.parse::<usize>()).collect::<Result<Vec<_>, _>>())
-            .transpose()?;
-        let command = MiCommand::data_list_register_names(reg_list.clone());
+        // First, get all register names to build a name-to-number mapping
+        let command = MiCommand::data_list_register_names(None);
         let response = self.send_command_with_timeout(session_id, &command).await?;
-        let names: Vec<String> = serde_json::from_value(
+        let all_names: Vec<String> = serde_json::from_value(
             response
                 .results
                 .get("register-names")
@@ -334,7 +332,28 @@ impl GDBManager {
                 .to_owned(),
         )?;
 
-        let command = MiCommand::data_list_register_values(RegisterFormat::Hex, reg_list);
+        // Convert register names to numbers if needed
+        let reg_numbers = if let Some(list) = reg_list {
+            let mut numbers = Vec::new();
+            for item in list {
+                // Try to parse as number first
+                if let Ok(num) = item.parse::<usize>() {
+                    numbers.push(num);
+                } else {
+                    // It's a name, find its number
+                    if let Some(pos) = all_names.iter().position(|name| name == &item) {
+                        numbers.push(pos);
+                    } else {
+                        return Err(AppError::NotFound(format!("Register '{}' not found", item)));
+                    }
+                }
+            }
+            Some(numbers)
+        } else {
+            None
+        };
+
+        let command = MiCommand::data_list_register_values(RegisterFormat::Hex, reg_numbers);
         let response = self.send_command_with_timeout(session_id, &command).await?;
 
         let registers: Vec<Register> = serde_json::from_value(
@@ -347,7 +366,7 @@ impl GDBManager {
         Ok(registers
             .into_iter()
             .map(|mut r| {
-                r.name = names.get(r.number).cloned();
+                r.name = all_names.get(r.number).cloned();
                 r
             })
             .collect::<_>())
@@ -358,7 +377,7 @@ impl GDBManager {
         &self,
         session_id: &str,
         reg_list: Option<Vec<String>>,
-    ) -> AppResult<Vec<Register>> {
+    ) -> AppResult<Vec<String>> {
         let reg_list = reg_list
             .map(|s| s.iter().map(|num| num.parse::<usize>()).collect::<Result<Vec<_>, _>>())
             .transpose()?;
@@ -368,8 +387,8 @@ impl GDBManager {
         Ok(serde_json::from_value(
             response
                 .results
-                .get("register-values")
-                .ok_or(AppError::NotFound("expect register-values".to_string()))?
+                .get("register-names")
+                .ok_or(AppError::NotFound("expect register-names".to_string()))?
                 .to_owned(),
         )?)
     }
